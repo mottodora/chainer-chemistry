@@ -32,6 +32,7 @@ except ImportError:
     #sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     #sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
     sys.path.insert(0, root_dir)
+    import chainerchem
 # sys.path.insert(0, os.path.abspath('.'))
 #sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
