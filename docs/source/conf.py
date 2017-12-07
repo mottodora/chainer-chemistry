@@ -19,6 +19,13 @@
 #
 import os
 import sys
+root_dir = os.path.abspath('../..')
+try:
+    import chainerchem
+    print("can install")
+except ImportError:
+    print("can't install")
+    sys.path.insert(0, root_dir)
 # sys.path.insert(0, os.path.abspath('.'))
 #sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
