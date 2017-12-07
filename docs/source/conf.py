@@ -30,8 +30,8 @@ except ImportError:
     print(root_dir)
     print(os.listdir(root_dir))
     #sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
-    #sys.path.insert(0, root_dir)
+    #sys.path.insert(0, os.path.abspath(os.path.dirname(__file__)))
+    sys.path.insert(0, root_dir)
 # sys.path.insert(0, os.path.abspath('.'))
 #sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
