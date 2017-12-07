@@ -19,7 +19,7 @@
 #
 import os
 import sys
-root_dir = os.path.abspath('../../..')
+root_dir = os.path.abspath('../..')
 try:
     import chainerchem
     print("success installing")
