@@ -19,4 +19,5 @@ preprocess_method_dict = {
     'schnet': SchNetPreprocessor,
     'weavenet': WeaveNetPreprocessor,
     'rsgcn': RSGCNPreprocessor,
+    'sparse_rsgcn_coo': RSGCNPreprocessor
 }

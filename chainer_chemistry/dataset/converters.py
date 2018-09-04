@@ -1,4 +1,5 @@
 import chainer
+from chainer.utils.sparse import to_coo
 
 
 def concat_mols(batch, device=None, padding=0):
@@ -66,3 +67,11 @@ def concat_mols(batch, device=None, padding=0):
         The type depends on the type of each example in the batch.
     """
     return chainer.dataset.concat_examples(batch, device, padding=padding)
+
+
+def concat_mols_by_sparse_matrix(batch, device=None, padding=0):
+    result = chainer.dataset.concat_examples(batch, device, padding=padding)
+    assert len(result) == 3
+    atom_array, adj, label = result
+    adj = to_coo(adj)
+    return (atom_array, adj, label)

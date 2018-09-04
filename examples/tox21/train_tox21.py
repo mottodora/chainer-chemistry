@@ -1,15 +1,19 @@
-#!/usr/bin/env python
-
 from __future__ import print_function
-
 import os
 
 import logging
+
+try:
+    import matplotlib
+    matplotlib.use('Agg')
+except ImportError:
+    pass
 
 import argparse
 import chainer
 from chainer import functions as F
 from chainer import iterators as I
+from chainer import links as L
 from chainer import optimizers as O
 from chainer import training
 from chainer.training import extensions as E
@@ -17,13 +21,26 @@ import json
 from rdkit import RDLogger
 
 from chainer_chemistry.dataset.converters import concat_mols
+from chainer_chemistry.dataset.converters import concat_mols_by_sparse_matrix
 from chainer_chemistry import datasets as D
-from chainer_chemistry.iterators.balanced_serial_iterator import BalancedSerialIterator  # NOQA
-from chainer_chemistry.models.prediction import Classifier
-from chainer_chemistry.training.extensions import ROCAUCEvaluator  # NOQA
+try:
+    from chainer_chemistry.iterators.balanced_serial_iterator import BalancedSerialIterator  # NOQA
+except ImportError:
+    print('[WARNING] If you want to use BalancedSerialIterator, please install'
+          'the library from master branch.\n          See '
+          'https://github.com/pfnet-research/chainer-chemistry#installation'
+          ' for detail.')
+try:
+    from chainer_chemistry.training.extensions import ROCAUCEvaluator  # NOQA
+except ImportError:
+    print('[WARNING] If you want to use ROCAUCEvaluator, please install'
+          'the library from master branch.\n          See '
+          'https://github.com/pfnet-research/chainer-chemistry#installation'
+          ' for detail.')
 
 import data
 import predictor
+
 
 # Disable errors by RDKit occurred in preprocessing Tox21 dataset.
 lg = RDLogger.logger()
@@ -34,7 +51,8 @@ logging.basicConfig(level=logging.INFO)
 
 def main():
     # Supported preprocessing/network list
-    method_list = ['nfp', 'ggnn', 'schnet', 'weavenet', 'rsgcn']
+    method_list = ['nfp', 'ggnn', 'schnet', 'weavenet', 'rsgcn',
+                   'sparse_rsgcn', 'sparse_rsgcn_coo']
     label_names = D.get_tox21_label_names()
     iterator_type = ['serial', 'balanced']
 
@@ -72,16 +90,19 @@ def main():
                         help='path to a trainer snapshot')
     parser.add_argument('--frequency', '-f', type=int, default=-1,
                         help='Frequency of taking a snapshot')
-    parser.add_argument('--protocol', type=int, default=2,
-                        help='protocol version for pickle')
-    parser.add_argument('--model-filename', type=str, default='classifier.pkl',
-                        help='file name for pickled model')
-    parser.add_argument('--num-data', type=int, default=-1,
-                        help='Number of data to be parsed from parser.'
-                             '-1 indicates to parse all data.')
+    parser.add_argument('--flatten', action='store_true',
+                        help='to flatten sparse matrix')
+    parser.add_argument('--multiplier', type=int, default=1,
+                        help='(debug) make the length of each molecule N '
+                        'times')
     args = parser.parse_args()
 
     method = args.method
+    if method not in ['rsgcn', 'sparse_rsgcn', 'sparse_rsgcn_coo']:
+        raise ValueError(
+            'This experimental branch only supports rsgcn or sparse_rsgcn '
+            'method, got {} instead'.format(method))
+
     if args.label:
         labels = args.label
         class_num = len(labels) if isinstance(labels, list) else 1
@@ -90,7 +111,7 @@ def main():
         class_num = len(label_names)
 
     # Dataset preparation
-    train, val, _ = data.load_dataset(method, labels, num_data=args.num_data)
+    train, val, _ = data.load_dataset(method, labels)
 
     # Network
     predictor_ = predictor.build_predictor(
@@ -112,20 +133,28 @@ def main():
     val_iter = I.SerialIterator(val, args.batchsize,
                                 repeat=False, shuffle=False)
 
-    classifier = Classifier(predictor_,
-                            lossfun=F.sigmoid_cross_entropy,
-                            metrics_fun=F.binary_accuracy,
-                            device=args.gpu)
+    classifier = L.Classifier(predictor_,
+                              lossfun=F.sigmoid_cross_entropy,
+                              accfun=F.binary_accuracy)
+    if args.gpu >= 0:
+        chainer.cuda.get_device_from_id(args.gpu).use()
+        classifier.to_gpu()
 
     optimizer = O.Adam()
     optimizer.setup(classifier)
 
+    def converter(batch, device=None):
+        if method == 'sparse_rsgcn_coo':
+            return concat_mols_by_sparse_matrix(batch, device)
+        else:
+            return concat_mols(batch, device)
+
     updater = training.StandardUpdater(
-        train_iter, optimizer, device=args.gpu, converter=concat_mols)
+        train_iter, optimizer, device=args.gpu, converter=converter)
     trainer = training.Trainer(updater, (args.epoch, 'epoch'), out=args.out)
 
     trainer.extend(E.Evaluator(val_iter, classifier,
-                               device=args.gpu, converter=concat_mols))
+                               device=args.gpu, converter=converter))
     trainer.extend(E.LogReport())
 
     eval_mode = args.eval_mode
@@ -138,13 +167,13 @@ def main():
                                            repeat=False, shuffle=False)
         trainer.extend(ROCAUCEvaluator(
             train_eval_iter, classifier, eval_func=predictor_,
-            device=args.gpu, converter=concat_mols, name='train',
-            pos_labels=1, ignore_labels=-1, raise_value_error=False))
+            device=args.gpu, converter=converter, name='train',
+            pos_labels=1, ignore_labels=-1))
         # extension name='validation' is already used by `Evaluator`,
         # instead extension name `val` is used.
         trainer.extend(ROCAUCEvaluator(
             val_iter, classifier, eval_func=predictor_,
-            device=args.gpu, converter=concat_mols, name='val',
+            device=args.gpu, converter=converter, name='val',
             pos_labels=1, ignore_labels=-1))
         trainer.extend(E.PrintReport([
             'epoch', 'main/loss', 'main/accuracy', 'train/main/roc_auc',
@@ -169,8 +198,6 @@ def main():
     with open(os.path.join(args.out, 'config.json'), 'w') as o:
         o.write(json.dumps(config))
 
-    classifier.save_pickle(os.path.join(args.out, args.model_filename),
-                           protocol=args.protocol)
 
 if __name__ == '__main__':
     main()

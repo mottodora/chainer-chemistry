@@ -38,6 +38,17 @@ class RSGCNUpdate(chainer.Chain):
         return y
 
 
+class SparseRSGCNCooUpdate(RSGCNUpdate):
+    """Sparse RSGCN sub module for message and update part"""
+
+    def __call__(self, x, sp_adj):
+        assert type(sp_adj) == chainer.utils.sparse.CooMatrix
+        h = chainer.functions.sparse_matmul(sp_adj, x)
+        # --- Update part ---
+        y = self.graph_linear(h)
+        return y
+
+
 def rsgcn_readout_sum(x, activation=None):
     """Default readout function for `RSGCN`
 
@@ -60,18 +71,15 @@ def rsgcn_readout_sum(x, activation=None):
 class RSGCN(chainer.Chain):
 
     """Renormalized Spectral Graph Convolutional Network (RSGCN)
-
     See: Thomas N. Kipf and Max Welling, \
         Semi-Supervised Classification with Graph Convolutional Networks. \
         September 2016. \
         `arXiv:1609.02907 <https://arxiv.org/abs/1609.02907>`_
-
     The name of this model "Renormalized Spectral Graph Convolutional Network
     (RSGCN)" is named by us rather than the authors of the paper above.
     The authors call this model just "Graph Convolution Network (GCN)", but
     we think that "GCN" is bit too general and may cause namespace issue.
     That is why we did not name this model as GCN.
-
     Args:
         out_dim (int): dimension of output feature vector
         hidden_dim (int): dimension of feature vector
@@ -83,28 +91,31 @@ class RSGCN(chainer.Chain):
         readout (Callable): readout function. If None, `rsgcn_readout_sum` is
             used. To the best of our knowledge, the paper of RSGCN model does
             not give any suggestion on readout.
-        dropout_ratio (float): ratio used in dropout function.
-            If 0 or negative value is set, dropout function is skipped.
-
     """
 
     def __init__(self, out_dim, hidden_dim=32, n_layers=4,
                  n_atom_types=MAX_ATOMIC_NUM,
-                 use_batch_norm=False, readout=None, dropout_ratio=0.5):
+                 use_batch_norm=False, readout=None):
         super(RSGCN, self).__init__()
-        in_dims = [hidden_dim for _ in range(n_layers)]
-        out_dims = [hidden_dim for _ in range(n_layers)]
-        out_dims[n_layers - 1] = out_dim
+        self.in_dims = [hidden_dim for _ in range(n_layers)]
+        self.out_dims = [hidden_dim for _ in range(n_layers)]
+        self.out_dims[n_layers - 1] = out_dim
+        self.readout = None
         with self.init_scope():
             self.embed = chainer_chemistry.links.EmbedAtomID(
                 in_size=n_atom_types, out_size=hidden_dim)
-            self.gconvs = chainer.ChainList(
-                *[RSGCNUpdate(in_dims[i], out_dims[i])
-                  for i in range(n_layers)])
+            if getattr(self, '_use_coomatrix', False):
+                self.gconvs = chainer.ChainList(
+                    *[SparseRSGCNCooUpdate(self.in_dims[i], self.out_dims[i])
+                      for i in range(n_layers)])
+            else:
+                self.gconvs = chainer.ChainList(
+                    *[RSGCNUpdate(self.in_dims[i], self.out_dims[i])
+                      for i in range(n_layers)])
             if use_batch_norm:
                 self.bnorms = chainer.ChainList(
                     *[chainer_chemistry.links.GraphBatchNormalization(
-                        out_dims[i]) for i in range(n_layers)])
+                        self.out_dims[i]) for i in range(n_layers)])
             else:
                 self.bnorms = [None for _ in range(n_layers)]
             if isinstance(readout, chainer.Link):
@@ -114,11 +125,28 @@ class RSGCN(chainer.Chain):
         self.out_dim = out_dim
         self.hidden_dim = hidden_dim
         self.n_layers = n_layers
-        self.dropout_ratio = dropout_ratio
+
+    def _forward_core(self, graph, adj):
+        if graph.dtype == self.xp.int32:
+            # atom_array: (minibatch, nodes)
+            h = self.embed(graph)
+        else:
+            h = graph
+
+        for i, (gconv, bnorm) in enumerate(zip(self.gconvs,
+                                               self.bnorms)):
+            h = gconv(h, adj)
+            if bnorm is not None:
+                h = bnorm(h)
+            h = functions.dropout(h)
+            if i < self.n_layers - 1:
+                h = functions.relu(h)
+
+        y = self.readout(h)
+        return y
 
     def __call__(self, graph, adj):
         """Forward propagation
-
         Args:
             graph (numpy.ndarray): minibatch of molecular which is
                 represented with atom IDs (representing C, O, S, ...)
@@ -127,34 +155,39 @@ class RSGCN(chainer.Chain):
             adj (numpy.ndarray): minibatch of adjancency matrix
                 `adj[mol_index]` represents `mol_index`-th molecule's
                 adjacency matrix
-
         Returns:
             ~chainer.Variable: minibatch of fingerprint
         """
-        if graph.dtype == self.xp.int32:
-            # atom_array: (minibatch, nodes)
-            h = self.embed(graph)
-        else:
-            h = graph
-        # h: (minibatch, nodes, ch)
-
         if isinstance(adj, Variable):
             w_adj = adj.data
         else:
             w_adj = adj
         w_adj = Variable(w_adj, requires_grad=False)
 
-        # --- RSGCN update ---
-        for i, (gconv, bnorm) in enumerate(zip(self.gconvs,
-                                               self.bnorms)):
-            h = gconv(h, w_adj)
-            if bnorm is not None:
-                h = bnorm(h)
-            if self.dropout_ratio > 0.:
-                h = functions.dropout(h, ratio=self.dropout_ratio)
-            if i < self.n_layers - 1:
-                h = functions.relu(h)
+        return self._forward_core(graph, w_adj)
 
-        # --- readout ---
-        y = self.readout(h)
-        return y
+
+class SparseRSGCNCoo(RSGCN):
+    """Sparse matrix version of RSGCN"""
+    def __init__(self, out_dim, hidden_dim=32, n_layers=4,
+                 n_atom_types=MAX_ATOMIC_NUM,
+                 use_batch_norm=False, readout=None):
+        self._use_sparse_matrix = True
+        self._use_coomatrix = True
+        super(SparseRSGCNCoo, self).__init__(
+            out_dim, hidden_dim, n_layers, n_atom_types, use_batch_norm,
+            readout)
+
+    def __call__(self, graph, adj):
+        """Forward propagation
+        Args:
+            graph (numpy.ndarray): minibatch of molecular which is
+                represented with atom IDs (representing C, O, S, ...)
+                `atom_array[mol_index, atom_index]` represents `mol_index`-th
+                molecule's `atom_index`-th atomic number
+            adj (chainer.utils.sparse.CooMatrix) : adj array
+        Returns:
+            ~chainer.Variable: minibatch of fingerprint
+        """
+        assert type(adj) == chainer.utils.sparse.CooMatrix
+        return self._forward_core(graph, adj)
